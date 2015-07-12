@@ -37,7 +37,7 @@ class MeterS0 : public vz::protocol::Protocol {
 		virtual ~HWIF() {};
 		virtual bool _open() = 0;
 		virtual bool _close() = 0;
-		virtual bool waitForImpulse() = 0;
+		virtual bool waitForImpulse(bool &neg) = 0;
 	};
 
 	class HWIF_UART : public HWIF {
@@ -47,7 +47,7 @@ class MeterS0 : public vz::protocol::Protocol {
 
 		virtual bool _open();
 		virtual bool _close();
-		virtual bool waitForImpulse();
+		virtual bool waitForImpulse(bool &neg);
 	protected:
 		std::string _device;
 		int _fd;					// file descriptor of UART
@@ -61,12 +61,15 @@ class MeterS0 : public vz::protocol::Protocol {
 
 		virtual bool _open();
 		virtual bool _close();
-		virtual bool waitForImpulse();
+		virtual bool waitForImpulse(bool &neg);
 	protected:
 		int _fd;
+		int _fd_dir;
 		int _gpiopin;
+		int _gpio_dir_pin;
 		bool _configureGPIO; // try export,...
 		std::string _device;
+		std::string _device_dir;
 	};
 
 public:

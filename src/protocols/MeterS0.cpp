@@ -113,18 +113,18 @@ ssize_t MeterS0::read(std::vector<Reading> &rds, size_t n) {
 
 	if (!_hwif) return 0;
 	if (n<2) return 0; // would be worth a debug msg!
+	bool neg = false;
 
 	// wait for very first impulse
 	if (!_impulseReceived) {
-
-		if (!_hwif->waitForImpulse()) return 0;
+		if (!_hwif->waitForImpulse(neg)) return 0;
 
 		gettimeofday(&_time_last, NULL);
 
 		_impulseReceived = true;
 
 		// store timestamp
-		rds[0].identifier(new StringIdentifier("Impulse"));
+		rds[0].identifier(new StringIdentifier(neg ? "Impulse_neg" : "Impulse"));
 		rds[0].time(_time_last);
 		rds[0].value(1);
 
@@ -148,7 +148,7 @@ ssize_t MeterS0::read(std::vector<Reading> &rds, size_t n) {
 		}
 	}
 
-	if (!_hwif->waitForImpulse()) return 0;
+	if (!_hwif->waitForImpulse(neg)) return 0;
 
 	gettimeofday(&time_now, NULL);
 
@@ -160,15 +160,15 @@ ssize_t MeterS0::read(std::vector<Reading> &rds, size_t n) {
 	memcpy(&_time_last, &time_now, sizeof(struct timeval));
 
 	// store current timestamp
-	rds[0].identifier(new StringIdentifier("Power"));
+	rds[0].identifier(new StringIdentifier(neg ? "Power_neg" : "Power")); // todo this is wrong if direction changes!
 	rds[0].time(time_now);
 	rds[0].value(value);
 
-	rds[1].identifier(new StringIdentifier("Impulse"));
+	rds[1].identifier(new StringIdentifier(neg ? "Impulse_neg" : "Impulse"));
 	rds[1].time(time_now);
 	rds[1].value(1);
 
-	print(log_debug, "Reading S0 - n=%d power=%f", name().c_str(), n, rds[0].value());
+	print(log_debug, "Reading S0 - n=%d power=%f dir=%s", name().c_str(), n, rds[0].value(), neg ? "-" : "+");
 
 	return 2;
 }
@@ -236,7 +236,7 @@ bool MeterS0::HWIF_UART::_close()
 	return true;
 }
 
-bool MeterS0::HWIF_UART::waitForImpulse()
+bool MeterS0::HWIF_UART::waitForImpulse(bool &neg)
 {
 	if (_fd<0) return false;
 	char buf[8];
@@ -246,12 +246,12 @@ bool MeterS0::HWIF_UART::waitForImpulse()
 
 	// blocking until one character/pulse is read
 	if (::read(_fd, buf, 8) < 1) return false;
-
+	neg = false; // direction/sign not supported with UART HWIF
 	return true;
 }
 
 MeterS0::HWIF_GPIO::HWIF_GPIO(const std::list<Option> &options) :
-	_fd(-1), _gpiopin(-1), _configureGPIO(true)
+	_fd(-1), _fd_dir(-1), _gpiopin(-1), _gpio_dir_pin(-1), _configureGPIO(true)
 {
 	OptionList optlist;
 
@@ -270,15 +270,27 @@ MeterS0::HWIF_GPIO::HWIF_GPIO(const std::list<Option> &options) :
 		_configureGPIO = true;
 	}
 
+	try {
+		_gpio_dir_pin = optlist.lookup_int(options, "gpio_dir");
+	} catch (vz::VZException &e) {
+			// ignore, keep default, disabled.
+	}
+	if (_gpio_dir_pin == _gpiopin) throw vz::VZException("gpio_dir pin needs to be different than gpio pin");
+
 	_device.append("/sys/class/gpio/gpio");
 	_device.append(std::to_string(_gpiopin));
 	_device.append("/value");
 
+	if (_gpio_dir_pin >= 0) {
+		_device_dir.append("/sys/class/gpio");
+		_device_dir.append(std::to_string(_gpio_dir_pin));
+		_device_dir.append("/value");
+	}
 }
 
 MeterS0::HWIF_GPIO::~HWIF_GPIO()
 {
-	if (_fd>=0) _close();
+	if (_fd>=0 || _fd_dir>=0) _close();
 }
 
 bool MeterS0::HWIF_GPIO::_open()
@@ -287,6 +299,7 @@ bool MeterS0::HWIF_GPIO::_open()
 	int fd;
 	unsigned int res;
 
+	// configure main gpio pin:
 	if (!::access(_device.c_str(),F_OK)){
 		// exists
 	} else {
@@ -344,20 +357,88 @@ bool MeterS0::HWIF_GPIO::_open()
 
 	_fd = fd;
 
+	if (_gpio_dir_pin >= 0) {
+		// configure direction gpio pin:
+		if (!::access(_device_dir.c_str(),F_OK)){
+			// exists
+		} else {
+			if (_configureGPIO) {
+				fd = ::open("/sys/class/gpio/export",O_WRONLY);
+				if (fd<0) throw vz::VZException("open export failed");
+				name.clear();
+				name.append(std::to_string(_gpio_dir_pin));
+				name.append("\n");
+
+				res=write(fd,name.c_str(), name.length()+1); // is the trailing zero really needed?
+				if ((name.length()+1)!=res) throw vz::VZException("export gpio_dir pin failed");
+				::close(fd);
+			} else return false; // doesn't exist and we shall not configure
+		}
+
+		// now it exists:
+		if (_configureGPIO) {
+			name.clear();
+			name.append("/sys/class/gpio/gpio");
+			name.append(std::to_string(_gpio_dir_pin));
+			name.append("/direction");
+			fd = ::open(name.c_str(), O_WRONLY);
+			if (fd<0) throw vz::VZException("open direction on gpio_dir pin failed");
+			res=::write(fd,"in\n",3);
+			if (3!=res) throw vz::VZException("set direction on gpio dir pin failed");
+			if (::close(fd)<0) throw vz::VZException("set direction on gpio dir pin failed");
+
+			// we configure for edge interrupt even though we don't use it for now
+			name.clear();
+			name.append("/sys/class/gpio/gpio");
+			name.append(std::to_string(_gpio_dir_pin));
+			name.append("/edge");
+			fd = ::open(name.c_str(), O_WRONLY);
+			if (fd<0) throw vz::VZException("open edge on gpio_dir pin failed");
+			res=::write(fd,"rising\n",7);
+			if (7!=res) throw vz::VZException("set edge on gpio_dir pin failed");
+			if (::close(fd)<0) throw vz::VZException("set edge failed");
+
+			name.clear();
+			name.append("/sys/class/gpio/gpio");
+			name.append(std::to_string(_gpio_dir_pin));
+			name.append("/active_low");
+			fd = ::open(name.c_str(), O_WRONLY);
+			if (fd<0) throw vz::VZException("open active_low on gpio dir pin failed");
+			res=::write(fd,"0\n",2);
+			if (2!=res) throw vz::VZException("set active_low on gpio dir pin failed");
+			if (::close(fd)<0) throw vz::VZException("set active_low failed");
+		}
+
+		fd = ::open( _device_dir.c_str(), O_RDONLY | O_EXCL); // EXCL really needed?
+		if (fd < 0) {
+			print(log_error, "open gpio dir pin (%s): %s", "", _device.c_str(), strerror(errno));
+			return false;
+		}
+
+		_fd_dir = fd;
+	}
+
 	return true;
 }
 
 bool MeterS0::HWIF_GPIO::_close()
 {
-	if (_fd<0) return false;
+	if (_fd<0 && _fd_dir<0) return false;
 
-	::close(_fd);
-	_fd = -1;
+	if (_fd >= 0) {
+		::close(_fd);
+		_fd = -1;
+	}
+
+	if (_fd_dir >= 0) {
+		::close( _fd_dir );
+		_fd_dir = -1;
+	}
 
 	return true;
 }
 
-bool MeterS0::HWIF_GPIO::waitForImpulse()
+bool MeterS0::HWIF_GPIO::waitForImpulse( bool &neg )
 {
 	unsigned char buf[2];
 	if (_fd<0) return false;
@@ -372,6 +453,12 @@ bool MeterS0::HWIF_GPIO::waitForImpulse()
 	if (rv > 0) {
 		if (poll_fd.revents & POLLPRI) {
 			if (::pread(_fd, buf, 1, 0) < 1) return false;
+			// now check direction:
+			if (_gpio_dir_pin >= 0) {
+				// if gpio dir pin set, direction is assumed to be negative:
+				if (::pread(_fd_dir, buf, 1, 0) < 1) return false;
+				if (buf[0] != '0') neg = true;
+			} else neg = false;
 		} else return false;
 	} else return false;
 
