@@ -86,6 +86,7 @@ ReadingIdentifier::Ptr reading_id_parse(meter_protocol_t protocol, const char *s
 	switch (protocol) {
 			case meter_protocol_d0:
 			case meter_protocol_sml:
+			case meter_protocol_oms:
 				rid = ReadingIdentifier::Ptr(new ObisIdentifier(Obis(string)));
 				break;
 
@@ -117,6 +118,7 @@ ReadingIdentifier::Ptr reading_id_parse(meter_protocol_t protocol, const char *s
 			case meter_protocol_exec:
 			case meter_protocol_s0:
 			case meter_protocol_ocr:
+			case meter_protocol_w1therm:
 				rid = ReadingIdentifier::Ptr(new StringIdentifier(string));
 				break;
 
